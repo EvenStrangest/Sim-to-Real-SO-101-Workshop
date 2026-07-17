@@ -95,3 +95,8 @@ gym.register(
     },
 )
 
+
+# oracle-3d-sensing: the import_packages sweep above does NOT reach this
+# module (verified 2026-07-17 -- direct import registers, sweep doesn't), so
+# import it explicitly; it self-registers the -Oracle(-Eval) variants.
+from . import vials_to_rack_oracle_env_cfg  # noqa: F401, E402
