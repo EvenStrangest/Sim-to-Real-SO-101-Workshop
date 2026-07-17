@@ -52,3 +52,55 @@ def image_raw(
     images = sensor.data.output[data_type]
 
     return images.clone()
+
+
+# ---------------------------------------------------------------------------
+# Oracle 3-D state terms (oracle-3d-sensing branch).
+#
+# Raw world-frame poses of the task objects, the end-effector frame, and the
+# robot base, recorded per step for the sparse-object-3-D channel (terraforge
+# VIALS_TO_RACK_SIM2REAL_DESIGN_AND_PLAN.md §6: record RAW poses, derive
+# keypoints offline). Poses are env-origin-relative world frame; quaternions
+# are Isaac (w, x, y, z). One term serves demo collection AND live eval.
+# ---------------------------------------------------------------------------
+
+
+def oracle_object_poses_w(
+    env: ManagerBasedRLEnv,
+    object_names: list[str],
+) -> torch.Tensor:
+    """Concatenated [pos(3), quat_wxyz(4)] per object, world frame relative to
+    the env origin. Shape (E, 7 * len(object_names))."""
+    origins = env.scene.env_origins
+    chunks = []
+    for name in object_names:
+        obj = env.scene[name]
+        pos = obj.data.root_pos_w - origins
+        quat = obj.data.root_quat_w
+        chunks.append(torch.cat([pos, quat], dim=1))
+    return torch.cat(chunks, dim=1)
+
+
+def oracle_ee_pose_w(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """End-effector (gripper-link) pose [pos(3), quat_wxyz(4)] in env-origin-
+    relative world frame. Shape (E, 7)."""
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    pos = ee_frame.data.target_pos_w[:, 0, :] - env.scene.env_origins
+    quat = ee_frame.data.target_quat_w[:, 0, :]
+    return torch.cat([pos, quat], dim=1)
+
+
+def oracle_robot_base_pose_w(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Robot base pose [pos(3), quat_wxyz(4)] in env-origin-relative world
+    frame — recorded so the world->robot-base re-expression of the 3-D channel
+    is self-contained offline. Shape (E, 7)."""
+    robot: Articulation = env.scene[robot_cfg.name]
+    pos = robot.data.root_pos_w - env.scene.env_origins
+    quat = robot.data.root_quat_w
+    return torch.cat([pos, quat], dim=1)

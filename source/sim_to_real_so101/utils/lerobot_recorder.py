@@ -42,8 +42,10 @@ class LeRobotRecorder:
         device: str,
         cameras: dict,
         save_mp4: bool = False,
-        depth: bool = False, # not saved in lerobot dataset
+        depth: bool = False, # not saved in lerobot dataset (mp4 sidecar is viz-only, not metric)
         instance_id_seg: bool = False, # not saved in lerobot dataset
+        oracle_features: dict | None = None,  # {feature_name: dim} float32 per-frame features (oracle-3d-sensing)
+        oracle_meta: dict | None = None,  # conventions sidecar, dumped to meta/oracle_sidecar.json
     ):
 
         self.fps = fps
@@ -52,6 +54,8 @@ class LeRobotRecorder:
         self.rgb = True # default to save rgb videos
         self.depth = depth
         self.instance_id_seg = instance_id_seg
+        self.oracle_features = oracle_features or {}
+        self.oracle_meta = oracle_meta
 
         self.camera_features_template = {
             "dtype": "video",
@@ -89,6 +93,15 @@ class LeRobotRecorder:
                     f"observation.images.{camera_name}": features,
                 }
             )
+
+        # Oracle per-frame float features (raw poses; keypoints derived offline).
+        for feature_name, dim in self.oracle_features.items():
+            self.FOLLOWER_OBS_FEATURES[feature_name] = {
+                "dtype": "float32",
+                "fps": self.fps,
+                "shape": (dim,),
+                "names": None,
+            }
 
         self.LEADER_ACTION_FEATURES = {
             "action": {
@@ -134,6 +147,7 @@ class LeRobotRecorder:
         self.rgb_buffer_tensors = {}
         self.depth_buffer_tensors = {}
         self.instance_id_seg_buffers_tensors = {}
+        self.oracle_buffer_tensors = {}
 
         self.episode_queue = queue.Queue()
         self.episode_processor_stop_event = threading.Event()
@@ -190,6 +204,15 @@ class LeRobotRecorder:
 
         print(f"[INFO]: New dataset initialized - {self.dataset.root}")
 
+        if self.oracle_meta is not None:
+            import json
+
+            sidecar_path = os.path.join(str(self.dataset.root), "meta", "oracle_sidecar.json")
+            os.makedirs(os.path.dirname(sidecar_path), exist_ok=True)
+            with open(sidecar_path, "w") as f:
+                json.dump(self.oracle_meta, f, indent=1)
+            print(f"[INFO]: Oracle conventions sidecar written - {sidecar_path}")
+
     def allocate_buffers(self):
         self.action_buffers_tensor = torch.zeros(
             (self.capcity, 6), dtype=torch.float32, device=self.device
@@ -197,6 +220,11 @@ class LeRobotRecorder:
         self.observation_buffer_tensor = torch.zeros(
             (self.capcity, 6), dtype=torch.float32, device=self.device
         )
+
+        self.oracle_buffer_tensors = {
+            name: torch.zeros((self.capcity, dim), dtype=torch.float32, device=self.device)
+            for name, dim in self.oracle_features.items()
+        }
 
         for camera_name in self.cameras.keys():
             if self.rgb:
@@ -228,7 +256,7 @@ class LeRobotRecorder:
                     device=self.device,
                 )
 
-    def push_frame_to_buffer(self, action, observation, visual_buffers, depth_buffers, instance_id_seg_buffers):
+    def push_frame_to_buffer(self, action, observation, visual_buffers, depth_buffers, instance_id_seg_buffers, oracle_values=None):
         if self.current_frame >= self.capcity:
             # TODO: extand tensors to increase the buffer capacity if reached
             print(
@@ -241,6 +269,11 @@ class LeRobotRecorder:
 
         self.action_buffers_tensor[self.current_frame] = action.clone()
         self.observation_buffer_tensor[self.current_frame] = observation.clone()
+
+        if self.oracle_features:
+            assert oracle_values is not None, "oracle_features configured but no oracle_values pushed"
+            for name in self.oracle_features.keys():
+                self.oracle_buffer_tensors[name][self.current_frame] = oracle_values[name].clone()
 
         for camera_name in self.cameras.keys():
             if self.rgb:
@@ -258,7 +291,7 @@ class LeRobotRecorder:
 
         self.current_frame += 1
 
-    def add_dataset_frame(self, action, observation, rgb_buffers, frame_index):
+    def add_dataset_frame(self, action, observation, rgb_buffers, frame_index, oracle_frame=None):
         frame = {
             "action": action,
             "observation.state": observation,
@@ -266,6 +299,9 @@ class LeRobotRecorder:
         }
         for camera_name in self.cameras.keys():
             frame[f"observation.images.{camera_name}"] = rgb_buffers[camera_name]
+
+        if oracle_frame is not None:
+            frame.update(oracle_frame)
 
         self.dataset.add_frame(frame)
 
@@ -292,6 +328,12 @@ class LeRobotRecorder:
                 "total_frames": self.current_frame,
             }
 
+            if self.oracle_features:
+                episode_data["oracle_buffers"] = {
+                    name: self.oracle_buffer_tensors[name].to("cpu").numpy().copy()
+                    for name in self.oracle_features.keys()
+                }
+
             if self.depth:
                 cpu_depth_buffer_tensors = {}
                 for camera_name in self.cameras.keys():
@@ -317,6 +359,7 @@ class LeRobotRecorder:
             self.rgb_buffer_tensor = {}
             self.depth_buffer_tensors = {}
             self.instance_id_seg_buffers_tensors = {}
+            self.oracle_buffer_tensors = {}
             self.current_frame = 0
             print("[INFO]: Cleared buffers")
 
@@ -326,6 +369,7 @@ class LeRobotRecorder:
             self.action_buffers_tensor = None
             self.observation_buffer_tensor = None
             self.rgb_buffer_tensor = {}
+            self.oracle_buffer_tensors = {}
             self.current_frame = 0
             print("[INFO]: Cleared buffers")
             print(f"[INFO]: Episode cancelled.")
@@ -342,16 +386,26 @@ class LeRobotRecorder:
                 
                 total_frames = episode["total_frames"]
 
+                oracle_buffers = episode.get("oracle_buffers", None)
+
                 for frame_index in tqdm(range(total_frames), desc="Processing frames", unit="frame"):
                     rgb_buffers = {}
                     for camera_name in self.cameras.keys():
                         rgb_buffers[camera_name] = rgb_buffer_tensors[camera_name][frame_index]
+
+                    oracle_frame = None
+                    if oracle_buffers is not None:
+                        oracle_frame = {
+                            name: oracle_buffers[name][frame_index]
+                            for name in oracle_buffers.keys()
+                        }
 
                     self.add_dataset_frame(
                         action_buffers[frame_index],
                         observation_buffer_tensor[frame_index],
                         rgb_buffers,
                         frame_index,
+                        oracle_frame=oracle_frame,
                     )
 
                 # Save depth and RGB videos for each camera (once per episode, after processing all frames)

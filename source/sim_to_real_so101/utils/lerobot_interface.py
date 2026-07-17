@@ -258,7 +258,7 @@ class LeRobotSO101Interface:
             preprocessor=self.preprocessor,
             postprocessor=self.postprocessor,
             use_amp=self.policy.config.use_amp,
-            task="Pick up the vial and place it in the tray",
+            task="Pick up the vial and place it in the rack",
             robot_type=self.robot.robot_type,
         )
         return action_values
@@ -315,7 +315,7 @@ class GR00TRemotePolicy:
         host: str = "localhost",
         port: int = 5555,
         action_horizon: int = 8,
-        lang_instruction: str = "Pick up the vial and place it in the tray",
+        lang_instruction: str = "Pick up the vial and place it in the rack",
     ):
         self._iface = robot_iface
         self._host = host

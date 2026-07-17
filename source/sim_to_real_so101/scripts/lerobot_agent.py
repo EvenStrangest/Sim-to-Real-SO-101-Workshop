@@ -63,6 +63,20 @@ parser.add_argument(
 )
 parser.add_argument("--task_name", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=101, help="Environment seed")
+parser.add_argument(
+    "--oracle",
+    action="store_true",
+    default=False,
+    help="Record the 'oracle' observation group (raw object/EE/base poses) into "
+    "the dataset as float32 features (requires an -Oracle task variant).",
+)
+parser.add_argument(
+    "--oracle_meta_json",
+    type=str,
+    default=None,
+    help="Path to a conventions-sidecar JSON (from the terraforge canonical-OBB "
+    "library) copied into the dataset meta/ as oracle_sidecar.json.",
+)
 
 
 # append AppLauncher cli args
@@ -152,6 +166,24 @@ def main():
     else:
         recording_mode = False
 
+    oracle_features = None
+    oracle_meta = None
+    if recording_mode and args_cli.oracle:
+        probe_obs, _ = env.reset()
+        assert "oracle" in probe_obs, (
+            "--oracle requires a task with an 'oracle' observation group "
+            "(use an -Oracle task variant)"
+        )
+        oracle_features = {
+            f"observation.{name}": int(tensor.shape[1])
+            for name, tensor in probe_obs["oracle"].items()
+        }
+        if args_cli.oracle_meta_json is not None:
+            import json
+
+            with open(args_cli.oracle_meta_json) as f:
+                oracle_meta = json.load(f)
+
     if recording_mode:
         recorder = LeRobotRecorder(
             task_name=args_cli.task_name,
@@ -163,6 +195,8 @@ def main():
             save_mp4=args_cli.save_mp4,
             depth=args_cli.depth,
             instance_id_seg=args_cli.instance_id_seg,
+            oracle_features=oracle_features,
+            oracle_meta=oracle_meta,
         )
         try:
             recorder.init_dataset()
@@ -201,12 +235,19 @@ def main():
                 real_obs, visual_buffers, depth_buffers, instance_id_seg_buffers = (
                     robot_iface.sim_to_real_dataset_processor(joint_pos_obs, visual_obs)
                 )
+                oracle_values = None
+                if args_cli.oracle:
+                    oracle_values = {
+                        f"observation.{name}": tensor[0]
+                        for name, tensor in obs["oracle"].items()
+                    }
                 recorder.push_frame_to_buffer(
                     real_action,
                     real_obs,
                     visual_buffers,
                     depth_buffers,
                     instance_id_seg_buffers,
+                    oracle_values=oracle_values,
                 )
 
     env.close()
