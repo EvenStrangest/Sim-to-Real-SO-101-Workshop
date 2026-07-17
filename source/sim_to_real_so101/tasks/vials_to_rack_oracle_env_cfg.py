@@ -47,6 +47,8 @@ from sim_to_real_so101.mdp import (
     oracle_object_poses_w,
     oracle_ee_pose_w,
     oracle_robot_base_pose_w,
+    image,
+    image_raw,
 )
 
 from .task_env_cfg import camera_object
@@ -90,7 +92,38 @@ class VialsToRackOracleSceneCfg(VialsToRackSceneCfg):
 
 @configclass
 class VialsToRackOracleObservationsCfg(VialsToRackObservationsCfg):
-    """Stock observations + the oracle group."""
+    """Stock observations + geometry-camera visual terms + the oracle group."""
+
+    @configclass
+    class OracleVisualCfg(VialsToRackObservationsCfg.VisualCfg):
+        """Stock visual group extended with the geometry camera (term names
+        follow the rgb_/depth_/instance_id_seg_<camera> convention the
+        recording processors rely on)."""
+
+        rgb_geometry = ObsTerm(
+            func=image,
+            params={
+                "sensor_cfg": SceneEntityCfg("camera_geometry"),
+                "data_type": "rgb",
+                "normalize": False,
+            },
+        )
+        depth_geometry = ObsTerm(
+            func=image,
+            params={
+                "sensor_cfg": SceneEntityCfg("camera_geometry"),
+                "data_type": "depth",
+            },
+        )
+        instance_id_seg_geometry = ObsTerm(
+            func=image_raw,
+            params={
+                "sensor_cfg": SceneEntityCfg("camera_geometry"),
+                "data_type": "instance_id_segmentation_fast",
+            },
+        )
+
+    visual: OracleVisualCfg = OracleVisualCfg()
 
     @configclass
     class OracleCfg(ObsGroup):
