@@ -95,3 +95,20 @@ gym.register(
     },
 )
 
+
+# Graded external-camera-pose OOD axis — see vials_to_rack_env_cfg.py for the
+# level magnitudes and rationale. Appearance DR is deliberately OFF in these so
+# the camera axis is isolated rather than confounded with lighting/colour.
+for _lvl in ("L1", "L2", "L3"):
+    gym.register(
+        id=f"Lerobot-So101-Teleop-Vials-To-Rack-CamPose{_lvl}-Eval",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": (
+                f"{__name__}.vials_to_rack_env_cfg:"
+                f"VialsToRackEvalCamPose{_lvl}EnvCfg"
+            ),
+        },
+    )
+

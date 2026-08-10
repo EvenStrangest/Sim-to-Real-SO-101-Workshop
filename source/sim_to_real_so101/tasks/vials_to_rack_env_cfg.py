@@ -36,6 +36,7 @@ from sim_to_real_so101.mdp import (
     ROBOT_COLORS,
     randomize_mat_rotation,
     randomize_robot_color,
+    randomize_camera_pose,
     any_vial_grasped,
     vial_placed_on_rack,
     vial_placed_on_rack_termination,
@@ -310,3 +311,96 @@ class VialsToRackEvalDREnvCfg(VialsToRackDREnvCfg):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.episode_length_s = 450 / 60.0
+
+
+# ---------------------------------------------------------------------------
+# Graded external-camera-pose OOD axis.
+#
+# Added for the terraforge-vla NV-VtR campaign (VIALS_TO_RACK_SIM2REAL_DESIGN_
+# AND_PLAN.md §5.9). Motivation: independent reports attribute VtR sim-to-real
+# failures to camera EXTRINSICS differing between the physical rig and the
+# digital twin, and a systematic inventory (§5.9.2b) found that every stock VtR
+# randomization axis is present during data collection as well as at eval — so
+# the benchmark ships no out-of-distribution axis at all. Stock
+# `reset_camera_external_pose` jitters the mount by +/-2cm and +/-0.05 rad
+# (~+/-2.9 deg); the policy therefore trains on that magnitude and is robust to
+# it by construction. These levels exceed it, so they are genuinely OOD.
+#
+# Levels are ROTATION-DOMINANT: at the external camera's ~0.5-1 m working
+# distance, 1 deg of aim error displaces the subject by roughly 9-17 mm in the
+# image, far more than a centimetre of translation does, and a technician
+# remounting a camera lands within a few cm of the intended spot but can easily
+# be 10-15 deg off in aim. Position is scaled gently and z keeps the stock
+# half-of-xy ratio.
+#
+#   level  position (x,y / z)   rotation        x trained rotation
+#   L0     +/-2cm / +/-1cm      +/-0.05 rad     1.0x   (stock; in-distribution)
+#   L1     +/-3cm / +/-1.5cm    +/-0.087 rad    1.7x
+#   L2     +/-5cm / +/-2.5cm    +/-0.175 rad    3.4x
+#   L3     +/-7cm / +/-3.5cm    +/-0.262 rad    5.2x
+#
+# NOTE these override the INHERITED term of the same name, so each level
+# REPLACES stock jitter rather than compounding with it.
+# ---------------------------------------------------------------------------
+
+_CAM_MOUNT = "{ENV_REGEX_NS}/LightStudio/LightBox/camera_mount"
+
+
+def _campose_term(xy: float, z: float, rot: float) -> EventTerm:
+    """Build a camera-pose randomization term with symmetric ranges."""
+    return EventTerm(
+        func=randomize_camera_pose,
+        mode="reset",
+        params={
+            "prim_path_pattern": _CAM_MOUNT,
+            "pos_range": {"x": (-xy, xy), "y": (-xy, xy), "z": (-z, z)},
+            "rot_range": {
+                "roll": (-rot, rot),
+                "pitch": (-rot, rot),
+                "yaw": (-rot, rot),
+            },
+        },
+    )
+
+
+@configclass
+class VialsToRackEventCamPoseL1Cfg(VialsToRackEventCfg):
+    """Mild camera-extrinsics OOD: +/-3 cm, +/-5 deg."""
+
+    reset_camera_external_pose = _campose_term(0.03, 0.015, 0.0873)
+
+
+@configclass
+class VialsToRackEventCamPoseL2Cfg(VialsToRackEventCfg):
+    """Moderate camera-extrinsics OOD: +/-5 cm, +/-10 deg."""
+
+    reset_camera_external_pose = _campose_term(0.05, 0.025, 0.1745)
+
+
+@configclass
+class VialsToRackEventCamPoseL3Cfg(VialsToRackEventCfg):
+    """Severe but physically realistic camera-extrinsics OOD: +/-7 cm, +/-15 deg."""
+
+    reset_camera_external_pose = _campose_term(0.07, 0.035, 0.2618)
+
+
+@configclass
+class VialsToRackEvalCamPoseL1EnvCfg(VialsToRackEvalEnvCfg):
+    """Eval config, camera-extrinsics OOD level 1. Appearance DR is OFF, so this
+    isolates the camera axis rather than confounding it with lighting/colour."""
+
+    events: VialsToRackEventCamPoseL1Cfg = VialsToRackEventCamPoseL1Cfg()
+
+
+@configclass
+class VialsToRackEvalCamPoseL2EnvCfg(VialsToRackEvalEnvCfg):
+    """Eval config, camera-extrinsics OOD level 2."""
+
+    events: VialsToRackEventCamPoseL2Cfg = VialsToRackEventCamPoseL2Cfg()
+
+
+@configclass
+class VialsToRackEvalCamPoseL3EnvCfg(VialsToRackEvalEnvCfg):
+    """Eval config, camera-extrinsics OOD level 3."""
+
+    events: VialsToRackEventCamPoseL3Cfg = VialsToRackEventCamPoseL3Cfg()
