@@ -360,17 +360,26 @@ class GR00TRemotePolicy:
         return obs
 
     def _sim_obs_to_groot_inputs(
-        self, joint_positions: torch.Tensor, visual_obs: dict
+        self, joint_positions: torch.Tensor, visual_obs: dict, extra_obs: dict | None = None
     ) -> dict:
         """Convert Isaac Lab sim observations into the GR00T VLA input format.
 
         Args:
             joint_positions: Joint positions in sim radians, shape (6,).
             visual_obs: Visual observation dict from env (e.g. rgb_ego, rgb_external_D455).
+            extra_obs: Optional TOP-LEVEL side-channel entries to ship alongside
+                video/state/language — e.g. the NV-VtR sparse-object-3-D channel
+                ``{"sparse_obj_xyz": (max_N*9, D) float32,
+                   "sparse_obj_mask": (max_N,) bool}``. Each value is an ndarray
+                and receives the same two leading (B=1, T=1) dimensions as every
+                other leaf, so the server sees (1, 1, ...) — the shape
+                ``Gr00tPolicy._unbatch_observation`` / ``_to_vla_step_data``
+                expect for these keys. ``None`` (the default) leaves this method
+                byte-for-byte what it was: the RGB-only path adds no keys.
 
         Returns:
-            Dict with ``video``, ``state``, and ``language`` keys,
-            each with (B=1, T=1) leading dimensions.
+            Dict with ``video``, ``state``, and ``language`` keys (plus any
+            ``extra_obs`` keys), each with (B=1, T=1) leading dimensions.
         """
         state = self._iface.get_raw_actions_from_radians(joint_positions)
         state_np = state.cpu().numpy().astype(np.float32)
@@ -395,6 +404,19 @@ class GR00TRemotePolicy:
         model_obs["language"] = {
             "annotation.human.task_description": self._lang_instruction,
         }
+
+        # Optional top-level side channels (sparse-object-3-D). Added BEFORE the
+        # batch/time expansion so they pick up the identical (B=1, T=1) prefix,
+        # and only when the caller supplied them — with extra_obs=None this loop
+        # does not execute and model_obs is exactly the RGB-only dict.
+        if extra_obs:
+            for key, value in extra_obs.items():
+                if key in model_obs:
+                    raise KeyError(
+                        f"extra_obs key '{key}' collides with a core modality key; "
+                        f"the side channel must not shadow video/state/language."
+                    )
+                model_obs[key] = value
 
         # Add (B=1, T=1) leading dimensions
         model_obs = self._add_batch_time_dims(model_obs)
@@ -437,7 +459,11 @@ class GR00TRemotePolicy:
     # ------------------------------------------------------------------
 
     def get_action(
-        self, joint_positions: torch.Tensor, visual_obs: dict, log: bool = False
+        self,
+        joint_positions: torch.Tensor,
+        visual_obs: dict,
+        log: bool = False,
+        extra_obs: dict | None = None,
     ) -> torch.Tensor:
         """Return the next sim action as a radians tensor.
 
@@ -448,13 +474,18 @@ class GR00TRemotePolicy:
             joint_positions: Current joint positions in sim radians (6,).
             visual_obs: Visual observation dict from env.
             log: If True, send observation and action data to Rerun.
+            extra_obs: Optional top-level side-channel arrays (see
+                ``_sim_obs_to_groot_inputs``). Consumed only on the steps where
+                the action buffer is empty and the server is actually queried,
+                exactly like ``visual_obs``. Default ``None`` = RGB-only path,
+                unchanged.
 
         Returns:
             Tensor of mapped joint actions in sim radians, ready
             for ``env.step()``.
         """
         if len(self._action_queue) == 0:
-            model_input = self._sim_obs_to_groot_inputs(joint_positions, visual_obs)
+            model_input = self._sim_obs_to_groot_inputs(joint_positions, visual_obs, extra_obs)
             action_chunk, _info = self._client.get_action(model_input)
             decoded = self._decode_action_chunk(action_chunk)
             self._action_queue.extend(decoded)
