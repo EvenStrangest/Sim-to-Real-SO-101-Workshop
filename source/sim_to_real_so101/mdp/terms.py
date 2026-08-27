@@ -12,7 +12,51 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import torch
+
+# ---------------------------------------------------------------------------
+# PLACEMENT CRITERION VERSION (added 2026-08-27, user-directed).
+#
+# THE DEFECT THIS FIXES. The original `vial_placed_on_rack` credited a vial that
+# was vertical, inside the rack bbox, "grasped" (>2 N contact) within the recent
+# history window and not currently held. It NEVER required the vial to have been
+# LIFTED OR MOVED -- so a vial ALREADY sitting in the rack at reset satisfied the
+# geometric conditions permanently, and a mere >2 N TOUCH followed by a release
+# scored a success with no transfer performed. Measured consequence: in the
+# sensor-realistic evaluation cells ~90 % of all credited successes were of this
+# kind, and on episodes that start with a racked vial the success rate was
+# essentially independent of the policy's 3-D input quality.
+# (terraforge-vla: VIALS_TO_RACK_SIM2REAL_DESIGN_AND_PLAN.md §10.6d;
+#  reports/realsense_vtr_bench/INRACK_CRITERION_FINDING.md)
+#
+# THE FIX: the credited vial must have LEFT the rack bounding box at some point
+# after warmup. A vial that starts on the mat satisfies this immediately; a
+# pre-racked vial only satisfies it once the robot actually lifts it out. A
+# touch-and-release therefore no longer scores. A lift-and-reseat DOES still
+# score, which is the intended reading of "left the bbox".
+#
+# DEFAULT ON, by explicit user decision, with an escape hatch for reproducing
+# archived runs. The direction matters: a forgotten flag on NEW work would
+# silently emit another loose-criterion number for someone to recount later,
+# whereas a forgotten flag on an OLD reproduction fails LOUDLY by not matching
+# the archived figure. Correct-by-default, loud-on-mismatch.
+#
+#     VTR_LEGACY_PLACEMENT_CRITERION=1   -> restore the pre-2026-08-27 behaviour
+#
+# EVERY consumer must stamp `PLACEMENT_CRITERION` into its records. No number
+# this project produces should ever again be ambiguous about which criterion
+# generated it -- that, not the code change, is the lesson of the finding.
+# ---------------------------------------------------------------------------
+LEGACY_PLACEMENT_CRITERION = os.environ.get("VTR_LEGACY_PLACEMENT_CRITERION") == "1"
+PLACEMENT_CRITERION = (
+    "legacy-2026-08-26-touch-of-pre-racked-vial-scores"
+    if LEGACY_PLACEMENT_CRITERION
+    else "v2-2026-08-27-requires-vial-to-have-left-rack-bbox"
+)
+print(f"[RACK-CRITERION] {PLACEMENT_CRITERION}"
+      + ("  <-- LEGACY: reproduces archived runs; NOT for new results"
+         if LEGACY_PLACEMENT_CRITERION else ""), flush=True)
 
 from pxr import Gf, Sdf
 
@@ -200,6 +244,10 @@ def vial_placed_on_rack(
         vial_placed_on_rack._vial_placed_flags = torch.zeros(
             num_envs, num_vials, dtype=torch.bool, device=device
         )
+        # v2 criterion: has THIS vial been outside the rack bbox since warmup?
+        vial_placed_on_rack._left_bbox_flags = torch.zeros(
+            num_envs, num_vials, dtype=torch.bool, device=device
+        )
 
     current_step = env.episode_length_buf
     in_warmup = current_step < warmup_steps
@@ -209,6 +257,7 @@ def vial_placed_on_rack(
         vial_placed_on_rack._grasp_history[just_reset] = False
         vial_placed_on_rack._prev_placed[just_reset] = False
         vial_placed_on_rack._vial_placed_flags[just_reset] = False
+        vial_placed_on_rack._left_bbox_flags[just_reset] = False
 
     # Get contact sensor for grasp detection
     contact_sensor: ContactSensor = env.scene[contact_sensor_cfg.name]
@@ -259,6 +308,15 @@ def vial_placed_on_rack(
 
         position_ok = x_in_bounds & y_in_bounds & z_below_top
 
+        # --- v2: track whether this vial has LEFT the rack bbox since warmup ---
+        # `~position_ok` is the exact complement of the placement geometry, so a
+        # vial on the mat qualifies immediately and a pre-racked vial qualifies
+        # only once the robot lifts it clear.
+        vial_placed_on_rack._left_bbox_flags[:, vial_idx] |= (
+            (~position_ok) & (~in_warmup)
+        )
+        has_left_bbox = vial_placed_on_rack._left_bbox_flags[:, vial_idx]
+
         # --- Combine all conditions ---
         vial_is_placed = (
             is_vertical
@@ -268,11 +326,15 @@ def vial_placed_on_rack(
             & (~in_warmup)
             & (~vial_placed_on_rack._vial_placed_flags[:, vial_idx])
         )
+        if not LEGACY_PLACEMENT_CRITERION:
+            # THE FIX: no credit for a vial that never left the rack.
+            vial_is_placed = vial_is_placed & has_left_bbox
 
         newly_placed = vial_is_placed
         if newly_placed.any():
             env_ids = torch.where(newly_placed)[0].tolist()
-            print(f"[RACK] {vial_name} placed in rack in env(s): {env_ids}")
+            print(f"[RACK] {vial_name} placed in rack in env(s): {env_ids} "
+                  f"[criterion={PLACEMENT_CRITERION}]")
             vial_placed_on_rack._vial_placed_flags[:, vial_idx] = (
                 vial_placed_on_rack._vial_placed_flags[:, vial_idx] | newly_placed
             )
