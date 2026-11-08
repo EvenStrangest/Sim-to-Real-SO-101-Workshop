@@ -41,8 +41,11 @@ RUN $PYTHON -m pip install -c /tmp/constraints.txt \
     "deepdiff>=7.0.1,<9.0.0" \
     "feetech-servo-sdk>=1.0.0,<2.0.0"
 
+# FFmpeg 7.1 pinned to a dated BtbN autobuild (terraforge, 2026-11-08): the "latest" release no longer carries 7.1
+# (only 8.1 and 9.0), so the original URL returns 404. 2026-06-30 is the autobuild "latest" pointed to when our
+# teleop-docker image (sha256:38c5094c...) was built on 2026-07-13.
 RUN curl --proto "=https" --tlsv1.2 -sSf -L -o /tmp/ffmpeg.tar.xz \
-    https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-lgpl-shared-7.1.tar.xz && \
+    https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n7.1.5-1-g7d0e842004-linux64-lgpl-shared-7.1.tar.xz && \
     tar -xf /tmp/ffmpeg.tar.xz -C /usr/local --strip-components=1 && \
     ldconfig && \
     rm /tmp/ffmpeg.tar.xz
