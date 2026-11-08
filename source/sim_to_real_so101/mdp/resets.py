@@ -25,7 +25,7 @@ import isaaclab.utils.math as math_utils
 from isaaclab.sim import get_current_stage
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.assets import Articulation, RigidObject
-from isaacsim.core.prims import XFormPrim
+from sim_to_real_so101.utils.isaac_compat import XFormPrim
 
 
 
