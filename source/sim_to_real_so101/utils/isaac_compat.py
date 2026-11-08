@@ -4,11 +4,18 @@
 On Isaac Sim 5.1 (this workshop's own image, Isaac Lab 2.3.2) both names come from Isaac Sim itself, unchanged.
 Isaac Sim 6.0 (Isaac Lab 3.0) dropped `isaacsim.core.utils.rotations` and `isaacsim.core.prims`; there the
 fallbacks below stand in, covering only what this package calls:
-  - euler_angles_to_quat(euler, degrees=False, extrinsic=True) -> (w, x, y, z), as Isaac Sim's;
-  - XFormPrim(prim_paths_expr=...) with .prims, set_local_poses(orientations=...) and get_local_poses().
+  - euler_angles_to_quat(euler, degrees=False, extrinsic=True), returned in the quaternion order the running Isaac
+    Lab expects for configs: (w, x, y, z) on Isaac Lab 2.x, (x, y, z, w) on Isaac Lab 3.0 (its convention changed);
+  - XFormPrim(prim_paths_expr=...) with .prims, set_local_poses(orientations=...) and get_local_poses(), taking and
+    returning quaternions in Isaac Lab's order, as Isaac Lab's math utilities produce them.
+LAB_QUAT_XYZW says which order the running Isaac Lab uses (read from its own camera-offset default).
 Needed to run the twin on r2d2, whose driver (595.91) Isaac Sim 5.1's RTX renderer crashes on.
 """
 from __future__ import annotations
+
+from isaaclab.sensors import CameraCfg as _CameraCfg
+
+LAB_QUAT_XYZW = tuple(_CameraCfg.OffsetCfg().rot) == (0.0, 0.0, 0.0, 1.0)
 
 try:
     from isaacsim.core.utils.rotations import euler_angles_to_quat  # noqa: F401
@@ -19,7 +26,7 @@ except ImportError:
     def euler_angles_to_quat(euler_angles, degrees: bool = False, extrinsic: bool = True):
         x, y, z, w = Rotation.from_euler("xyz" if extrinsic else "XYZ", np.asarray(euler_angles),
                                          degrees=degrees).as_quat()
-        return np.array([w, x, y, z])
+        return np.array([x, y, z, w]) if LAB_QUAT_XYZW else np.array([w, x, y, z])
 
 try:
     from isaacsim.core.prims import XFormPrim  # noqa: F401
@@ -54,7 +61,8 @@ except ImportError:
             for i, p in enumerate(self.prims):
                 xf = UsdGeom.Xformable(p)
                 if orientations is not None:
-                    w, x, y, z = (float(v) for v in torch.as_tensor(orientations)[i].tolist())
+                    q = [float(v) for v in torch.as_tensor(orientations)[i].tolist()]
+                    w, x, y, z = (q[3], q[0], q[1], q[2]) if LAB_QUAT_XYZW else q
                     op = self._orient_op(xf)
                     q = Gf.Quatf(w, x, y, z) if op.GetPrecision() == UsdGeom.XformOp.PrecisionFloat \
                         else Gf.Quatd(w, x, y, z)
@@ -69,5 +77,6 @@ except ImportError:
                 t = m.ExtractTranslation()
                 r = m.ExtractRotationQuat()
                 pos.append([t[0], t[1], t[2]])
-                quat.append([r.GetReal(), *r.GetImaginary()])
+                i3 = list(r.GetImaginary())
+                quat.append(i3 + [r.GetReal()] if LAB_QUAT_XYZW else [r.GetReal()] + i3)
             return torch.tensor(pos, dtype=torch.float32), torch.tensor(quat, dtype=torch.float32)
